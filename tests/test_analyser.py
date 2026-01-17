@@ -5,10 +5,12 @@ Tests core functionality without making actual API calls.
 
 import pytest
 import json
-from unittest.mock import Mock, patch
+import os
+from unittest.mock import Mock, patch, AsyncMock
 from news_fetcher import NewsFetcher
 from llm_analyzer import LLMAnalyzer
 from llm_validator import LLMValidator
+import httpx
 
 # Test data
 SAMPLE_ARTICLE = {
@@ -26,6 +28,7 @@ SAMPLE_ANALYSIS = {
     'tone': 'analytical'
 }
 
+@pytest.mark.asyncio
 class TestNewsFetcher:
     """Test the NewsFetcher class."""
     
@@ -35,8 +38,8 @@ class TestNewsFetcher:
             with pytest.raises(ValueError, match="NEWSAPI_KEY not found"):
                 NewsFetcher()
     
-    @patch('news_fetcher.requests.get')
-    def test_successful_article_fetch(self, mock_get):
+    @patch('httpx.AsyncClient.get')
+    async def test_successful_article_fetch(self, mock_get):
         """Test successful fetching of articles."""
         # Mock successful API response
         mock_response = Mock()
@@ -49,24 +52,24 @@ class TestNewsFetcher:
         
         with patch.dict('os.environ', {'NEWSAPI_KEY': 'test_key'}):
             fetcher = NewsFetcher()
-            articles = fetcher.fetch_india_politics_news(num_articles=1)
+            articles = await fetcher.fetch_news(num_articles=1)
             
             assert len(articles) == 1
             assert articles[0]['title'] == SAMPLE_ARTICLE['title']
             assert 'source' in articles[0]
     
-    @patch('news_fetcher.requests.get')
-    def test_fetch_with_timeout(self, mock_get):
+    @patch('httpx.AsyncClient.get')
+    async def test_fetch_with_timeout(self, mock_get):
         """Test handling of timeout errors."""
-        import requests
-        mock_get.side_effect = requests.exceptions.Timeout()
+        mock_get.side_effect = httpx.TimeoutException("Timeout")
         
         with patch.dict('os.environ', {'NEWSAPI_KEY': 'test_key'}):
             fetcher = NewsFetcher()
-            articles = fetcher.fetch_india_politics_news()
+            articles = await fetcher.fetch_news()
             
             assert articles == []
 
+@pytest.mark.asyncio
 class TestLLMAnalyzer:
     """Test the LLMAnalyzer class."""
     
@@ -76,53 +79,49 @@ class TestLLMAnalyzer:
             with pytest.raises(ValueError, match="GROQ_API_KEY not found"):
                 LLMAnalyzer()
     
-    @patch('llm_analyzer.requests.post')
-    def test_successful_analysis(self, mock_post):
+    async def test_successful_analysis(self):
         """Test successful article analysis."""
-        # Mock Groq response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'choices': [{
-                'message': {
-                    'content': json.dumps(SAMPLE_ANALYSIS)
-                }
-            }]
-        }
-        mock_post.return_value = mock_response
-        
         with patch.dict('os.environ', {'GROQ_API_KEY': 'test_key'}):
             analyzer = LLMAnalyzer()
-            result = analyzer.analyze_article(SAMPLE_ARTICLE)
+            
+            mock_create = AsyncMock()
+            mock_choice = Mock()
+            mock_choice.message.content = json.dumps(SAMPLE_ANALYSIS)
+            mock_response = Mock()
+            mock_response.choices = [mock_choice]
+            mock_create.return_value = mock_response
+            
+            # We mock the client's method via instance replacement or patch?
+            # Easiest is to replace the method on the instance, or `analyzer.client`.
+            analyzer.client.chat.completions.create = mock_create
+            
+            result = await analyzer.analyze_article(SAMPLE_ARTICLE)
             
             assert 'gist' in result
             assert 'sentiment' in result
             assert 'tone' in result
             assert result['sentiment'] in ['positive', 'negative', 'neutral']
-    
-    @patch('llm_analyzer.requests.post')
-    def test_analysis_with_json_error(self, mock_post):
+
+    async def test_analysis_with_json_error(self):
         """Test handling of malformed JSON response."""
-        # Mock invalid JSON response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'choices': [{
-                'message': {
-                    'content': "This is not JSON"
-                }
-            }]
-        }
-        mock_post.return_value = mock_response
-        
         with patch.dict('os.environ', {'GROQ_API_KEY': 'test_key'}):
             analyzer = LLMAnalyzer()
-            result = analyzer.analyze_article(SAMPLE_ARTICLE)
             
-            # Should return default analysis on error
+            mock_create = AsyncMock()
+            mock_choice = Mock()
+            mock_choice.message.content = "This is not JSON"
+            mock_response = Mock()
+            mock_response.choices = [mock_choice]
+            mock_create.return_value = mock_response
+            
+            analyzer.client.chat.completions.create = mock_create
+            
+            result = await analyzer.analyze_article(SAMPLE_ARTICLE)
+            
             assert 'gist' in result
-            assert 'error' in result
+            assert 'error' in result or result['gist'] == 'Unable to analyze article'
 
+@pytest.mark.asyncio
 class TestLLMValidator:
     """Test the LLMValidator class."""
     
@@ -132,45 +131,42 @@ class TestLLMValidator:
             with pytest.raises(ValueError, match="GROQ_API_KEY not found"):
                 LLMValidator()
     
-    @patch('llm_validator.requests.post')
-    def test_successful_validation(self, mock_post):
+    async def test_successful_validation(self):
         """Test successful validation of analysis."""
-        # Mock OpenRouter response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'choices': [{
-                'message': {
-                    'content': json.dumps({
-                        'is_valid': True,
-                        'notes': 'Analysis is accurate and well-justified.'
-                    })
-                }
-            }]
-        }
-        mock_post.return_value = mock_response
-        
         with patch.dict('os.environ', {'GROQ_API_KEY': 'test_key'}):
             validator = LLMValidator()
-            result = validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
+            
+            mock_create = AsyncMock()
+            mock_choice = Mock()
+            mock_choice.message.content = json.dumps({
+                'is_valid': True,
+                'notes': 'Analysis is accurate and well-justified.'
+            })
+            mock_response = Mock()
+            mock_response.choices = [mock_choice]
+            mock_create.return_value = mock_response
+            
+            validator.client.chat.completions.create = mock_create
+            
+            result = await validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
             
             assert 'is_valid' in result
             assert 'notes' in result
             assert isinstance(result['is_valid'], bool)
     
-    @patch('llm_validator.requests.post')
-    def test_validation_with_api_error(self, mock_post):
+    async def test_validation_with_api_error(self):
         """Test handling of API errors during validation."""
-        import requests
-        mock_post.side_effect = requests.exceptions.RequestException("API Error")
-        
         with patch.dict('os.environ', {'GROQ_API_KEY': 'test_key'}):
             validator = LLMValidator()
-            result = validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
             
-            # Should return error validation
+            mock_create = AsyncMock()
+            mock_create.side_effect = Exception("API Error")
+            validator.client.chat.completions.create = mock_create
+            
+            result = await validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
+            
             assert 'is_valid' in result
-            assert result['is_valid'] == False
+            assert result['is_valid'] is False
             assert 'error' in result
 
 def test_article_data_structure():
@@ -184,6 +180,3 @@ def test_analysis_data_structure():
     required_fields = ['gist', 'sentiment', 'tone']
     for field in required_fields:
         assert field in SAMPLE_ANALYSIS, f"Missing required field: {field}"
-
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])

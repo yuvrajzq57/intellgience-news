@@ -5,13 +5,10 @@ Orchestrates fetching, analysis, validation, and reporting.
 
 import os
 import json
-import time
 import asyncio
 from datetime import datetime
-from news_fetcher import NewsFetcher
-from llm_analyzer import LLMAnalyzer
-from llm_validator import LLMValidator
 from dotenv import load_dotenv
+from pipeline import NewsAnalysisPipeline
 
 def ensure_output_directory():
     """Create output directory if it doesn't exist."""
@@ -100,72 +97,47 @@ async def main():
     load_dotenv()
     
     # Step 1: Setup
-    print("\n[Step 1/5] Setting up...")
     ensure_output_directory()
     
-    # Step 2: Fetch news articles
-    print("\n[Step 2/5] Fetching news articles...")
-    fetcher = NewsFetcher()
-    # Note: fetcher is still sync, running in thread to be safe if main loop needed it,
-    # but for simple script direct call is fine. Using to_thread for good practice.
-    articles = await asyncio.to_thread(fetcher.fetch_news, topic="Indian Politics", num_articles=12)
+    pipeline = NewsAnalysisPipeline()
     
-    if not articles:
-        print("✗ No articles fetched. Exiting.")
-        return
-    
-    save_json(articles, 'raw_articles.json')
-    print(f"✓ Fetched {len(articles)} articles")
-    
-    # Step 3: Analyze with LLM#1 (Groq Llama 3.3 70B)
-    print("\n[Step 3/5] Analyzing with LLM#1 (Groq Llama 3.3 70B)...")
-    analyzer = LLMAnalyzer()
-    analysis_results = []
-    
-    for idx, article in enumerate(articles, 1):
-        print(f"  Analyzing article {idx}/{len(articles)}...", end=" ")
-        analysis = await analyzer.analyze_article(article)
-        analysis_results.append({
-            'article': article,
-            'analysis': analysis
-        })
-        print("✓")
-        # No sleep needed with async usually, but decent to be nice to API
-        await asyncio.sleep(1)
-    
-    save_json(analysis_results, 'analysis_results.json')
-    
-    # Step 4: Validate with LLM#2 (Groq Llama 3.1 8B)
-    print("\n[Step 4/5] Validating with LLM#2 (Groq Llama 3.1 8B)...")
-    validator = LLMValidator()
-    validated_results = []
-    
-    for idx, result in enumerate(analysis_results, 1):
-        print(f"  Validating article {idx}/{len(analysis_results)}...", end=" ")
-        validation = await validator.validate_analysis(
-            result['article'],
-            result['analysis']
-        )
-        validated_results.append({
-            'article': result['article'],
-            'analysis': result['analysis'],
-            'validation': validation
-        })
-        print("✓")
-        await asyncio.sleep(1)
-    
-    save_json(validated_results, 'validated_results.json')
-    
-    # Step 5: Generate final report
-    print("\n[Step 5/5] Generating final report...")
-    generate_markdown_report(validated_results)
-    
+    # Run pipeline and listen for events
+    async for event_data in pipeline.run(topic="Indian Politics", count=12):
+        event_type = event_data.get('event')
+        data = event_data.get('data')
+        
+        if event_type == 'log':
+            # Parse the JSON string in data to get the message
+            try:
+                msg_data = json.loads(data)
+                print(f"[LOG] {msg_data.get('message')}")
+            except:
+                print(f"[LOG] {data}")
+                
+        elif event_type == 'error':
+            print(f"✗ ERROR: {data}")
+            return
+            
+        elif event_type == 'close':
+            print("Stream closed.")
+            
+        elif event_type == 'full_result':
+            # Extract full data for saving
+            full_data = json.loads(data)
+            validated_results = full_data.get('validated_results', [])
+            raw_articles = full_data.get('raw_articles', [])
+            
+            save_json(raw_articles, 'raw_articles.json')
+            save_json(validated_results, 'validated_results.json') # Saves analysis_results implicitly as part of valid results if we want separate we'd need to emit it.
+            
+            # Generate report
+            generate_markdown_report(validated_results)
+
     print("\n" + "=" * 60)
     print("PIPELINE COMPLETED SUCCESSFULLY!")
     print("=" * 60)
     print("\nCheck the 'output' folder for:")
     print("  - raw_articles.json")
-    print("  - analysis_results.json")
     print("  - validated_results.json")
     print("  - final_report.md")
 

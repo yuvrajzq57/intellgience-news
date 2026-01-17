@@ -4,9 +4,12 @@ Handles API calls, rate limiting, and error handling.
 """
 
 import os
-import requests
+import httpx
 from datetime import datetime, timedelta
-import time
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 class NewsFetcher:
     """Fetches news articles from NewsAPI."""
@@ -18,11 +21,11 @@ class NewsFetcher:
             raise ValueError("NEWSAPI_KEY not found in environment variables")
         
         self.base_url = "https://newsapi.org/v2/everything"
-        self.timeout = 10  # seconds
+        self.timeout = 10.0  # seconds
     
-    def fetch_news(self, topic="Indian Politics", num_articles=12):
+    async def fetch_news(self, topic="Indian Politics", num_articles=12):
         """
-        Fetch recent news articles based on topic.
+        Fetch recent news articles based on topic (Async).
         
         Args:
             topic: Topic to fetch (default: "Indian Politics")
@@ -55,62 +58,55 @@ class NewsFetcher:
             'apiKey': self.api_key
         }
         
-        try:
-            print(f"  Requesting articles from NewsAPI...")
-            response = requests.get(
-                self.base_url,
-                params=params,
-                timeout=self.timeout
-            )
-            
-            # Handle rate limiting
-            if response.status_code == 429:
-                print("  Rate limit hit. Waiting 60 seconds...")
-                time.sleep(60)
-                response = requests.get(
-                    self.base_url,
-                    params=params,
-                    timeout=self.timeout
-                )
-            
-            # Check for successful response
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if data.get('status') != 'ok':
-                print(f"  API Error: {data.get('message', 'Unknown error')}")
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                print(f"  Requesting articles from NewsAPI...") # Keep print for CLI compatibility, or use logger
+                response = await client.get(self.base_url, params=params)
+                
+                # Handle rate limiting
+                if response.status_code == 429:
+                    print("  Rate limit hit. Waiting 60 seconds...")
+                    await asyncio.sleep(60)
+                    response = await client.get(self.base_url, params=params)
+                
+                # Check for successful response
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                if data.get('status') != 'ok':
+                    print(f"  API Error: {data.get('message', 'Unknown error')}")
+                    return []
+                
+                articles = data.get('articles', [])
+                
+                # Clean and normalize articles
+                cleaned_articles = []
+                for article in articles:
+                    # Skip articles without content
+                    if not article.get('title') or not article.get('description'):
+                        continue
+                    
+                    cleaned_article = {
+                        'title': article.get('title', '').strip(),
+                        'description': article.get('description', '').strip(),
+                        'content': article.get('content', '').strip(),
+                        'url': article.get('url', ''),
+                        'publishedAt': article.get('publishedAt', ''),
+                        'source': article.get('source', {}).get('name', 'Unknown')
+                    }
+                    cleaned_articles.append(cleaned_article)
+                
+                return cleaned_articles[:num_articles]
+                
+            except httpx.TimeoutException:
+                print(f"  Request timed out after {self.timeout} seconds")
                 return []
             
-            articles = data.get('articles', [])
+            except httpx.RequestError as e:
+                print(f"  Request error: {str(e)}")
+                return []
             
-            # Clean and normalize articles
-            cleaned_articles = []
-            for article in articles:
-                # Skip articles without content
-                if not article.get('title') or not article.get('description'):
-                    continue
-                
-                cleaned_article = {
-                    'title': article.get('title', '').strip(),
-                    'description': article.get('description', '').strip(),
-                    'content': article.get('content', '').strip(),
-                    'url': article.get('url', ''),
-                    'publishedAt': article.get('publishedAt', ''),
-                    'source': article.get('source', {}).get('name', 'Unknown')
-                }
-                cleaned_articles.append(cleaned_article)
-            
-            return cleaned_articles[:num_articles]
-            
-        except requests.exceptions.Timeout:
-            print(f"  Request timed out after {self.timeout} seconds")
-            return []
-        
-        except requests.exceptions.RequestException as e:
-            print(f"  Request error: {str(e)}")
-            return []
-        
-        except Exception as e:
-            print(f"  Unexpected error: {str(e)}")
-            return []
+            except Exception as e:
+                print(f"  Unexpected error: {str(e)}")
+                return []

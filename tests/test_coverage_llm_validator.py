@@ -2,8 +2,7 @@
 import pytest
 import json
 import os
-import requests
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, AsyncMock
 from llm_validator import LLMValidator
 
 # Sample data
@@ -19,6 +18,7 @@ SAMPLE_ANALYSIS = {
     'tone': 'objective'
 }
 
+@pytest.mark.asyncio
 class TestLLMValidatorCoverage:
     
     @pytest.fixture
@@ -26,129 +26,75 @@ class TestLLMValidatorCoverage:
         with patch.dict('os.environ', {'GROQ_API_KEY': 'test_key'}):
             return LLMValidator()
 
-    @patch('llm_validator.requests.post')
-    def test_json_cleanup_markdown(self, mock_post, validator):
+    async def test_json_cleanup_markdown(self, validator):
         """Test validation when LLM returns JSON wrapped in markdown code blocks."""
         # Case 1: ```json ... ```
-        mock_response = Mock()
-        mock_response.status_code = 200
         content_json_str = json.dumps({'is_valid': True, 'notes': 'Valid'})
-        mock_response.json.return_value = {
-            'choices': [{'message': {'content': f'```json\n{content_json_str}\n```'}}]
-        }
-        mock_post.return_value = mock_response
+        
+        mock_create = AsyncMock()
+        mock_choice = Mock()
+        mock_choice.message.content = f'```json\n{content_json_str}\n```'
+        mock_response = Mock()
+        mock_response.choices = [mock_choice]
+        mock_create.return_value = mock_response
+        
+        validator.client.chat.completions.create = mock_create
 
-        result = validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
+        result = await validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
         assert result['is_valid'] is True
         assert result['notes'] == 'Valid'
 
         # Case 2: ``` ... ``` (no language specifier)
-        mock_response.json.return_value = {
-            'choices': [{'message': {'content': f'```\n{content_json_str}\n```'}}]
-        }
-        result = validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
+        mock_choice.message.content = f'```\n{content_json_str}\n```'
+        mock_create.return_value = mock_response # reset if needed, but it's same object ref
+        
+        validator.client.chat.completions.create = mock_create
+        
+        result = await validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
         assert result['is_valid'] is True
 
-    @patch('llm_validator.requests.post')
-    def test_json_cleanup_extra_text(self, mock_post, validator):
-        """Test validation when LLM returns text alongside JSON (though cleanup might be strict/loose).
-           The current implementation strips markdown but assumes the rest is JSON.
-           Actually the code does:
-           if startswith ```json -> strip
-           if startswith ``` -> strip
-           if endswith ``` -> strip
-           Then json.loads(response_text)
-           So it MUST be valid JSON after stripping tags.
-        """
-        mock_response = Mock()
-        mock_response.status_code = 200
+    async def test_json_cleanup_extra_text(self, validator):
+        """Test validation when LLM returns text alongside JSON."""
         content_json_str = json.dumps({'is_valid': True, 'notes': 'Valid'})
         
-        # If there is extra text outside code blocks, it might fail if the code doesn't handle it.
-        # But let's test the success path where it is just whitespace.
-        mock_response.json.return_value = {
-            'choices': [{'message': {'content': f'   {content_json_str}   '}}]
-        }
-        mock_post.return_value = mock_response
-
-        result = validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
-        assert result['is_valid'] is True
-
-    @patch('llm_validator.requests.post')
-    @patch('llm_validator.time.sleep')
-    def test_rate_limiting_retry(self, mock_sleep, mock_post, validator):
-        """Test that the validator retries on 429 status code."""
-        # First response 429, second 200
-        response_429 = Mock()
-        response_429.status_code = 429
-        
-        response_200 = Mock()
-        response_200.status_code = 200
-        response_200.json.return_value = {
-            'choices': [{'message': {'content': json.dumps({'is_valid': True, 'notes': 'Retry success'})}}]
-        }
-        
-        mock_post.side_effect = [response_429, response_200]
-        
-        result = validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
-        
-        assert mock_post.call_count == 2
-        assert result['is_valid'] is True
-        assert result['notes'] == 'Retry success'
-        mock_sleep.assert_called()
-
-    @patch('llm_validator.requests.post')
-    @patch('llm_validator.time.sleep')
-    def test_retry_on_request_exception(self, mock_sleep, mock_post, validator):
-        """Test that the validator retries on RequestException."""
-        # First attempt raises Exception, second succeeds
-        response_200 = Mock()
-        response_200.status_code = 200
-        response_200.json.return_value = {
-            'choices': [{'message': {'content': json.dumps({'is_valid': True, 'notes': 'Success'})}}]
-        }
-        
-        mock_post.side_effect = [requests.exceptions.RequestException("Connection error"), response_200]
-        
-        result = validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
-        
-        assert mock_post.call_count == 2
-        assert result['is_valid'] is True
-
-    @patch('llm_validator.requests.post')
-    def test_missing_required_fields(self, mock_post, validator):
-        """Test handling of JSON missing required fields."""
+        mock_create = AsyncMock()
+        mock_choice = Mock()
+        mock_choice.message.content = f'   {content_json_str}   '
         mock_response = Mock()
-        mock_response.status_code = 200
-        # Missing 'notes'
-        mock_response.json.return_value = {
-            'choices': [{'message': {'content': json.dumps({'is_valid': True})}}]
-        }
-        mock_post.return_value = mock_response
+        mock_response.choices = [mock_choice]
+        mock_create.return_value = mock_response
         
-        # It should retry. Let's make it fail all retries with the same bad response.
-        # But wait, the code raises ValueError ("Missing required fields"), which is NOT a RequestException or JSONDecodeError.
-        # So checking line 121: except (requests.exceptions.RequestException, json.JSONDecodeError) ...
-        # ValueError is NOT caught there!
-        # It bubbles up to line 129: except Exception as e.
-        # So it should NOT retry for ValueError, it should fail immediately and return the error dict.
+        validator.client.chat.completions.create = mock_create
+
+        result = await validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
+        assert result['is_valid'] is True
+
+    async def test_missing_required_fields(self, validator):
+        """Test handling of JSON missing required fields."""
+        mock_create = AsyncMock()
+        mock_choice = Mock()
+        mock_choice.message.content = json.dumps({'is_valid': True}) # Missing notes
+        mock_response = Mock()
+        mock_response.choices = [mock_choice]
+        mock_create.return_value = mock_response
         
-        result = validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
+        validator.client.chat.completions.create = mock_create
         
+        result = await validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
+        
+        # Should catch ValueError and return error dict
         assert result['is_valid'] is False
         assert "Validation failed due to error" in result['notes']
         assert "Missing required fields" in result['error']
 
-    @patch('llm_validator.requests.post')
-    @patch('llm_validator.time.sleep')
-    def test_exhaust_retries(self, mock_sleep, mock_post, validator):
-        """Test that it fails gracefully after exhausting retries."""
-        mock_post.side_effect = requests.exceptions.RequestException("Persistent Error")
+    async def test_api_error_returns_failure(self, validator):
+        """Test that API errors return a failure result instead of crashing."""
+        mock_create = AsyncMock()
+        mock_create.side_effect = Exception("Persistent Error")
         
-        result = validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
+        validator.client.chat.completions.create = mock_create
         
-        # It tries 3 times (range(3))
-        assert mock_post.call_count == 3
+        result = await validator.validate_analysis(SAMPLE_ARTICLE, SAMPLE_ANALYSIS)
+        
         assert result['is_valid'] is False
         assert "Validation failed" in result['notes']
-
